@@ -44,6 +44,8 @@ namespace IdentityServer3.Core.Configuration
             this.LoggingOptions = new LoggingOptions();
             this.EventsOptions = new EventsOptions();
             this.EnableWelcomePage = true;
+            this.InputLengthRestrictions = new InputLengthRestrictions();
+            this.DiscoveryOptions = new DiscoveryOptions();
         }
 
         internal void Validate()
@@ -77,6 +79,12 @@ namespace IdentityServer3.Core.Configuration
         /// Unique name of this server instance, e.g. https://myissuer.com
         /// </value>
         public string IssuerUri { get; set; }
+
+        // todo: remove in 3.0.0
+        // added as a temporary measure since we need someplace to hold the calculated 
+        // IssuerUri from the first request for the scenarios where the newer GetIdentityServerIssuerUri
+        // extension method is not being used
+        internal string DynamicallyCalculatedIssuerUri { get; set; }
 
         /// <summary>
         /// Gets or sets the X.509 certificate (and corresponding private key) for signing security tokens.
@@ -135,6 +143,14 @@ namespace IdentityServer3.Core.Configuration
         public EndpointOptions Endpoints { get; set; }
 
         /// <summary>
+        /// Gets or sets the discovery endpoint configuration.
+        /// </summary>
+        /// <value>
+        /// The discovery endpoint configuration.
+        /// </value>
+        public DiscoveryOptions DiscoveryOptions { get; set; }
+
+        /// <summary>
         /// Gets or sets the authentication options.
         /// </summary>
         /// <value>
@@ -181,6 +197,14 @@ namespace IdentityServer3.Core.Configuration
         /// The events options.
         /// </value>
         public EventsOptions EventsOptions { get; set; }
+
+        /// <summary>
+        /// Gets or sets the max input length restrictions.
+        /// </summary>
+        /// <value>
+        /// The length restrictions.
+        /// </value>
+        public InputLengthRestrictions InputLengthRestrictions { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether the welcome page is enabled.

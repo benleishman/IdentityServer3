@@ -286,11 +286,11 @@ namespace IdentityServer3.Core.Extensions
             await events.RaiseEventAsync(evt);
         }
 
-        public static async Task RaiseTokenIssuedEventAsync(this IEventService events, Token token)
+        public static async Task RaiseTokenIssuedEventAsync(this IEventService events, Token token, string rawToken)
         {
             if (token.Type == Constants.TokenTypes.AccessToken)
             {
-                await events.RaiseAccessTokenIssuedEventAsync(token);
+                await events.RaiseAccessTokenIssuedEventAsync(token, rawToken);
             }
             else if (token.Type == Constants.TokenTypes.IdentityToken)
             {
@@ -298,13 +298,19 @@ namespace IdentityServer3.Core.Extensions
             }
         }
 
-        public static async Task RaiseAccessTokenIssuedEventAsync(this IEventService events, Token token)
+        public static async Task RaiseAccessTokenIssuedEventAsync(this IEventService events, Token token, string rawToken)
         {
             var evt = new Event<AccessTokenIssuedDetails>(
                 EventConstants.Categories.TokenService,
                 "Access token issued",
                 EventTypes.Information,
                 EventConstants.Ids.AccessTokenIssued);
+
+            string referenceTokenHandle = null;
+            if (token.Client.AccessTokenType == AccessTokenType.Reference)
+            {
+                referenceTokenHandle = rawToken;
+            }
 
             evt.DetailsFunc = () => new AccessTokenIssuedDetails
             {
@@ -313,7 +319,8 @@ namespace IdentityServer3.Core.Extensions
                 TokenType = token.Client.AccessTokenType,
                 Lifetime = token.Lifetime,
                 Scopes = token.Scopes,
-                Claims = token.Claims.ToClaimsDictionary()
+                Claims = token.Claims.ToClaimsDictionary(),
+                ReferenceTokenHandle = referenceTokenHandle
             };
 
             await events.RaiseAsync(evt);
@@ -399,6 +406,23 @@ namespace IdentityServer3.Core.Extensions
             await events.RaiseEventAsync(evt);
         }
 
+        public static async Task RaiseTokenRevokedEventAsync(this IEventService events, string subjectId, string token, string tokenType)
+        {
+            var evt = new Event<TokenRevokedDetails>(
+                EventConstants.Categories.Authentication,
+                Resources.Events.TokenRevoked,
+                EventTypes.Success,
+                EventConstants.Ids.TokenRevoked,
+                new TokenRevokedDetails()
+                {
+                    SubjectId = subjectId,
+                    Token = ObfuscateToken(token),
+                    TokenType = tokenType
+                });
+
+            await events.RaiseEventAsync(evt);
+        }
+
         public static async Task RaiseUnhandledExceptionEventAsync(this IEventService events, Exception exception)
         {
             var evt = new Event<object>(
@@ -409,6 +433,39 @@ namespace IdentityServer3.Core.Extensions
                 exception.ToString());
 
             await events.RaiseEventAsync(evt);
+        }
+
+        public static async Task RaiseSuccessfulClientAuthenticationEventAsync(this IEventService events, string clientId, string clientType)
+        {
+            var evt = new Event<ClientAuthenticationDetails>(
+                EventConstants.Categories.ClientAuthentication,
+                "Client authentication success",
+                EventTypes.Success,
+                EventConstants.Ids.ClientAuthenticationSuccess,
+                new ClientAuthenticationDetails
+                {
+                    ClientId = clientId,
+                    ClientType = clientType
+                });
+
+            await events.RaiseAsync(evt);
+        }
+
+        public static async Task RaiseFailureClientAuthenticationEventAsync(this IEventService events, string message, string clientId, string clientType)
+        {
+            var evt = new Event<ClientAuthenticationDetails>(
+                EventConstants.Categories.ClientAuthentication,
+                "Client authentication failure",
+                EventTypes.Failure,
+                EventConstants.Ids.ClientAuthenticationFailure,
+                new ClientAuthenticationDetails
+                {
+                    ClientId = clientId,
+                    ClientType = clientType
+                },
+                message);
+
+            await events.RaiseAsync(evt);
         }
 
         public static async Task RaiseSuccessfulEndpointEventAsync(this IEventService events, string endpointName)
@@ -431,6 +488,40 @@ namespace IdentityServer3.Core.Extensions
                  EventTypes.Failure,
                  EventConstants.Ids.EndpointFailure,
                  new EndpointDetail { EndpointName = endpointName },
+                 error);
+
+            await events.RaiseAsync(evt);
+        }
+
+        public static async Task RaiseSuccessfulIntrospectionEndpointEventAsync(this IEventService events, string token, string tokenStatus, string scopeName)
+        {
+            var evt = new Event<IntrospectionEndpointDetail>(
+                EventConstants.Categories.Endpoints,
+                "Introspection endpoint success",
+                EventTypes.Success,
+                EventConstants.Ids.IntrospectionEndpointSuccess,
+                new IntrospectionEndpointDetail
+                {
+                    Token = ObfuscateToken(token),
+                    TokenStatus = tokenStatus,
+                    ScopeName = scopeName
+                });
+
+            await events.RaiseAsync(evt);
+        }
+
+        public static async Task RaiseFailureIntrospectionEndpointEventAsync(this IEventService events, string error, string token, string scopeName)
+        {
+            var evt = new Event<IntrospectionEndpointDetail>(
+                 EventConstants.Categories.Endpoints,
+                 "Introspection endpoint failure",
+                 EventTypes.Failure,
+                 EventConstants.Ids.IntrospectionEndpointFailure,
+                 new IntrospectionEndpointDetail
+                 {
+                     Token = ObfuscateToken(token),
+                     ScopeName = scopeName
+                 },
                  error);
 
             await events.RaiseAsync(evt);
@@ -572,6 +663,17 @@ namespace IdentityServer3.Core.Extensions
             if (events == null) throw new ArgumentNullException("events");
 
             await events.RaiseAsync(evt);
+        }
+
+        private static string ObfuscateToken(string token)
+        {
+            string last4chars = "****";
+            if (token.IsPresent() && token.Length > 4)
+            {
+                last4chars = token.Substring(token.Length - 4);
+            }
+
+            return "****" + last4chars;
         }
     }
 }

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+using IdentityModel;
 using IdentityServer3.Core.Configuration;
 using IdentityServer3.Core.Extensions;
 using IdentityServer3.Core.Logging;
@@ -22,6 +23,7 @@ using IdentityServer3.Core.Services;
 using System;
 using System.Collections.Specialized;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace IdentityServer3.Core.Validation
@@ -91,7 +93,7 @@ namespace IdentityServer3.Core.Validation
                 return Invalid(Constants.TokenErrors.UnsupportedGrantType);
             }
 
-            if (grantType.Length > Constants.MaxGrantTypeLength)
+            if (grantType.Length > _options.InputLengthRestrictions.GrantType)
             {
                 LogError("Grant type is too long.");
                 return Invalid(Constants.TokenErrors.UnsupportedGrantType);
@@ -149,6 +151,10 @@ namespace IdentityServer3.Core.Validation
                 {
                     message += ": " + customResult.Error;
                 }
+                else
+                {
+                    customResult.Error = Constants.TokenErrors.InvalidRequest;
+                }
 
                 LogError(message);
                 return customResult;
@@ -165,8 +171,7 @@ namespace IdentityServer3.Core.Validation
             /////////////////////////////////////////////
             // check if client is authorized for grant type
             /////////////////////////////////////////////
-            if (_validatedRequest.Client.Flow != Flows.AuthorizationCode &&
-                _validatedRequest.Client.Flow != Flows.Hybrid)
+            if (Constants.AllowedFlowsForAuthorizationCodeGrantType.Contains(_validatedRequest.Client.Flow) == false)
             {
                 LogError("Client not authorized for code flow");
                 return Invalid(Constants.TokenErrors.UnauthorizedClient);
@@ -179,6 +184,15 @@ namespace IdentityServer3.Core.Validation
             if (code.IsMissing())
             {
                 var error = "Authorization code is missing.";
+                LogError(error);
+                await RaiseFailedAuthorizationCodeRedeemedEventAsync(null, error);
+
+                return Invalid(Constants.TokenErrors.InvalidGrant);
+            }
+
+            if (code.Length > _options.InputLengthRestrictions.AuthorizationCode)
+            {
+                var error = "Authorization code is too long.";
                 LogError(error);
                 await RaiseFailedAuthorizationCodeRedeemedEventAsync(null, error);
 
@@ -199,6 +213,14 @@ namespace IdentityServer3.Core.Validation
             await _authorizationCodes.RemoveAsync(code);
 
             /////////////////////////////////////////////
+            // populate session id
+            /////////////////////////////////////////////
+            if (authZcode.SessionId.IsPresent())
+            {
+                _validatedRequest.SessionId = authZcode.SessionId;
+            }
+
+            /////////////////////////////////////////////
             // validate client binding
             /////////////////////////////////////////////
             if (authZcode.Client.ClientId != _validatedRequest.Client.ClientId)
@@ -207,6 +229,30 @@ namespace IdentityServer3.Core.Validation
                 await RaiseFailedAuthorizationCodeRedeemedEventAsync(code, "Invalid client binding");
 
                 return Invalid(Constants.TokenErrors.InvalidGrant);
+            }
+
+            /////////////////////////////////////////////
+            // validate PKCE parameters
+            /////////////////////////////////////////////
+            var codeVerifier = parameters.Get(Constants.TokenRequest.CodeVerifier);
+            if (authZcode.Client.Flow == Flows.AuthorizationCodeWithProofKey ||
+                authZcode.Client.Flow == Flows.HybridWithProofKey)
+            {
+                var proofKeyResult = ValidateAuthorizationCodeWithProofKeyParameters(codeVerifier, authZcode);
+                if (proofKeyResult.IsError)
+                {
+                    return proofKeyResult;
+                }
+
+                _validatedRequest.CodeVerifier = codeVerifier;
+            }
+            else
+            {
+                if (codeVerifier.IsPresent())
+                {
+                    LogError("Unexpected code_verifier with Flow " + authZcode.Client.Flow.ToString());
+                    return Invalid(Constants.TokenErrors.InvalidGrant);
+                }
             }
 
             /////////////////////////////////////////////
@@ -272,6 +318,27 @@ namespace IdentityServer3.Core.Validation
                 await RaiseFailedAuthorizationCodeRedeemedEventAsync(code, error);
 
                 return Invalid(Constants.TokenErrors.InvalidRequest);
+            }
+
+            /////////////////////////////////////////////
+            // validate token type and PoP parameters if pop token is requested
+            /////////////////////////////////////////////
+            var tokenType = parameters.Get("token_type");
+            if (tokenType != null && tokenType == Constants.ResponseTokenTypes.PoP)
+            {
+                var result = ValidatePopParameters(parameters);
+                if (result.IsError)
+                {
+                    var error = "PoP parameter validation failed: " + result.ErrorDescription;
+                    LogError(error);
+                    await RaiseFailedAuthorizationCodeRedeemedEventAsync(code, error);
+
+                    return Invalid(result.Error, result.ErrorDescription);
+                }
+                else
+                {
+                    _validatedRequest.RequestedTokenType = RequestedTokenTypes.PoP;
+                }
             }
 
             Logger.Info("Validation of authorization code token request success");
@@ -363,8 +430,8 @@ namespace IdentityServer3.Core.Validation
                 return Invalid(Constants.TokenErrors.InvalidGrant);
             }
 
-            if (userName.Length > Constants.MaxUserNameLength ||
-                password.Length > Constants.MaxPasswordLength)
+            if (userName.Length > _options.InputLengthRestrictions.UserName ||
+                password.Length > _options.InputLengthRestrictions.Password)
             {
                 LogError("Username or password too long.");
                 return Invalid(Constants.TokenErrors.InvalidGrant);
@@ -384,7 +451,7 @@ namespace IdentityServer3.Core.Validation
             var acr = parameters.Get(Constants.AuthorizeRequest.AcrValues);
             if (acr.IsPresent())
             {
-                if (acr.Length > Constants.MaxAcrValuesLength)
+                if (acr.Length > _options.InputLengthRestrictions.AcrValues)
                 {
                     LogError("Acr values too long.");
                     return Invalid(Constants.TokenErrors.InvalidRequest);
@@ -474,6 +541,15 @@ namespace IdentityServer3.Core.Validation
                 return Invalid(Constants.TokenErrors.InvalidRequest);
             }
 
+            if (refreshTokenHandle.Length > _options.InputLengthRestrictions.RefreshToken)
+            {
+                var error = "Refresh token too long";
+                LogError(error);
+                await RaiseRefreshTokenRefreshFailureEventAsync(null, error);
+
+                return Invalid(Constants.TokenErrors.InvalidGrant);
+            }
+
             _validatedRequest.RefreshTokenHandle = refreshTokenHandle;
 
             /////////////////////////////////////////////
@@ -528,6 +604,25 @@ namespace IdentityServer3.Core.Validation
                 }
             }
 
+            /////////////////////////////////////////////
+            // check if client still has access to 
+            // all scopes from the original token request
+            /////////////////////////////////////////////
+            if (!_validatedRequest.Client.AllowAccessToAllScopes)
+            {
+                foreach (var scope in refreshToken.Scopes)
+                {
+                    if (!_validatedRequest.Client.AllowedScopes.Contains(scope))
+                    {
+                        var error = "Client does not have access to a requested scope anymore: " + scope;
+                        LogError(error);
+                        await RaiseRefreshTokenRefreshFailureEventAsync(refreshTokenHandle, error);
+
+                        return Invalid(Constants.TokenErrors.InvalidGrant);
+                    }
+                }
+            }
+
             _validatedRequest.RefreshToken = refreshToken;
 
             /////////////////////////////////////////////
@@ -545,6 +640,27 @@ namespace IdentityServer3.Core.Validation
                 await RaiseRefreshTokenRefreshFailureEventAsync(refreshTokenHandle, error);
 
                 return Invalid(Constants.TokenErrors.InvalidRequest);
+            }
+
+            /////////////////////////////////////////////
+            // validate token type and PoP parameters if pop token is requested
+            /////////////////////////////////////////////
+            var tokenType = parameters.Get("token_type");
+            if (tokenType != null && tokenType == "pop")
+            {
+                var result = ValidatePopParameters(parameters);
+                if (result.IsError)
+                {
+                    var error = "PoP parameter validation failed: " + result.ErrorDescription;
+                    LogError(error);
+                    await RaiseRefreshTokenRefreshFailureEventAsync(refreshTokenHandle, error);
+
+                    return Invalid(result.Error, result.ErrorDescription);
+                }
+                else
+                {
+                    _validatedRequest.RequestedTokenType = RequestedTokenTypes.PoP;
+                }
             }
 
             Logger.Info("Validation of refresh token request success");
@@ -605,12 +721,20 @@ namespace IdentityServer3.Core.Validation
                 return Invalid(Constants.TokenErrors.InvalidGrant);
             }
 
-            if (result.Error.IsPresent())
+            if (result.IsError)
             {
-                LogError("Invalid custom grant: " + result.Error);
-                return Invalid(result.Error);
+                if (result.Error.IsPresent())
+                {
+                    LogError("Invalid custom grant: " + result.Error);
+                    return Invalid(result.Error, result.ErrorDescription ?? "");
+                }
+                else
+                {
+                    LogError("Invalid custom grant.");
+                    return Invalid(Constants.TokenErrors.InvalidGrant);
+                }
             }
-
+            
             if (result.Principal != null)
             {
                 _validatedRequest.Subject = result.Principal;
@@ -623,7 +747,7 @@ namespace IdentityServer3.Core.Validation
         private async Task<bool> ValidateRequestedScopesAsync(NameValueCollection parameters)
         {
             var scopes = parameters.Get(Constants.TokenRequest.Scope);
-            if (scopes.IsMissingOrTooLong(Constants.MaxScopeLength))
+            if (scopes.IsMissingOrTooLong(_options.InputLengthRestrictions.Scope))
             {
                 Logger.Warn("Scopes missing or too long");
                 return false;
@@ -651,6 +775,98 @@ namespace IdentityServer3.Core.Validation
             return true;
         }
 
+        private TokenRequestValidationResult ValidateAuthorizationCodeWithProofKeyParameters(string codeVerifier, AuthorizationCode authZcode)
+        {
+            if (authZcode.CodeChallenge.IsMissing() || authZcode.CodeChallengeMethod.IsMissing())
+            {
+                LogError("Client uses AuthorizationCodeWithProofKey flow but missing code challenge or code challenge method in authZ code");
+                return Invalid(Constants.TokenErrors.InvalidGrant);
+            }
+
+            if (codeVerifier.IsMissing())
+            {
+                LogError("Missing code_verifier");
+                return Invalid(Constants.TokenErrors.InvalidGrant);
+            }
+
+            if (codeVerifier.Length < _options.InputLengthRestrictions.CodeVerifierMinLength ||
+                codeVerifier.Length > _options.InputLengthRestrictions.CodeVerifierMaxLength)
+            {
+                LogError("code_verifier is too short or too long.");
+                return Invalid(Constants.TokenErrors.InvalidGrant);
+            }
+
+            if (Constants.SupportedCodeChallengeMethods.Contains(authZcode.CodeChallengeMethod) == false)
+            {
+                LogError("Unsupported code challenge method: " + authZcode.CodeChallengeMethod);
+                return Invalid(Constants.TokenErrors.InvalidGrant);
+            }
+
+            if (ValidateCodeVerifierAgainstCodeChallenge(codeVerifier, authZcode.CodeChallenge, authZcode.CodeChallengeMethod) == false)
+            {
+                LogError("Transformed code verifier does not match code challenge");
+                return Invalid(Constants.TokenErrors.InvalidGrant);
+            }
+
+            return Valid();
+        }
+
+        private bool ValidateCodeVerifierAgainstCodeChallenge(string codeVerifier, string codeChallenge, string codeChallengeMethod)
+        {
+            if (codeChallengeMethod == Constants.CodeChallengeMethods.Plain)
+            {
+                return TimeConstantComparer.IsEqual(codeVerifier.Sha256(), codeChallenge);
+            }
+
+            var codeVerifierBytes = Encoding.ASCII.GetBytes(codeVerifier);
+            var hashedBytes = codeVerifierBytes.Sha256();
+            var transformedCodeVerifier = Base64Url.Encode(hashedBytes);
+
+            return TimeConstantComparer.IsEqual(transformedCodeVerifier.Sha256(), codeChallenge);
+        }
+
+        private TokenRequestValidationResult ValidatePopParameters(NameValueCollection parameters)
+        {
+            var invalid = new TokenRequestValidationResult
+            {
+                IsError = true,
+                Error = Constants.TokenErrors.InvalidRequest
+            };
+
+            // check optional alg
+            var alg = parameters.Get(Constants.TokenRequest.Algorithm);
+            if (alg != null)
+            {
+                // for now we only support asymmetric
+                if (!Constants.AllowedProofKeyAlgorithms.Contains(alg))
+                {
+                    invalid.ErrorDescription = "invalid alg.";
+                    return invalid;
+                }
+
+                _validatedRequest.ProofKeyAlgorithm = alg;
+            }
+            
+            // key is required - for now we only support client generated keys
+            var key = parameters.Get(Constants.TokenRequest.Key);
+            if (key == null)
+            {
+                invalid.ErrorDescription = "key is required.";
+                return invalid;
+            }
+            if (key.Length > _options.InputLengthRestrictions.ProofKey)
+            {
+                invalid.ErrorDescription = "invalid key.";
+                Logger.Warn("Proof key exceeds max allowed length.");
+                return invalid;
+            }
+
+            var jwk = string.Format("{{ \"jwk\":{0} }}", Encoding.UTF8.GetString(Base64Url.Decode(key)));
+            _validatedRequest.ProofKey = jwk;
+
+            return new TokenRequestValidationResult { IsError = false };
+        }
+
         private TokenRequestValidationResult Valid()
         {
             return new TokenRequestValidationResult
@@ -659,47 +875,46 @@ namespace IdentityServer3.Core.Validation
             };
         }
 
-        private TokenRequestValidationResult Invalid(string error)
+        private TokenRequestValidationResult Invalid(string error, string errorDescription = "")
         {
-            return new TokenRequestValidationResult
+            var result = new TokenRequestValidationResult
             {
                 IsError = true,
                 Error = error
             };
-        }
 
-        private TokenRequestValidationResult Invalid(string error, string errorDescription)
-        {
-            return new TokenRequestValidationResult
+            if (errorDescription.IsPresent())
             {
-                IsError = true,
-                Error = error,
-                ErrorDescription = errorDescription
-            };
+                result.ErrorDescription = errorDescription;
+            }
+
+            return result;
         }
 
         private void LogError(string message)
         {
-            var validationLog = new TokenRequestValidationLog(_validatedRequest);
-            var json = LogSerializer.Serialize(validationLog);
-
-            Logger.ErrorFormat("{0}\n {1}", message, json);
+            Logger.Error(LogEvent(message));
         }
 
         private void LogWarn(string message)
         {
-            var validationLog = new TokenRequestValidationLog(_validatedRequest);
-            var json = LogSerializer.Serialize(validationLog);
-
-            Logger.WarnFormat("{0}\n {1}", message, json);
+            Logger.Warn(LogEvent(message));
         }
 
         private void LogSuccess()
         {
-            var validationLog = new TokenRequestValidationLog(_validatedRequest);
-            var json = LogSerializer.Serialize(validationLog);
+            Logger.Info(LogEvent("Token request validation success"));
+        }
 
-            Logger.InfoFormat("{0}\n {1}", "Token request validation success", json);
+        private Func<string> LogEvent(string message)
+        {
+            return () =>
+            {
+                var validationLog = new TokenRequestValidationLog(_validatedRequest);
+                var json = LogSerializer.Serialize(validationLog);
+
+                return message + "\n " + json;
+            };
         }
 
         private async Task RaiseSuccessfulResourceOwnerAuthenticationEventAsync(string userName, string subjectId, SignInMessage signInMessage)

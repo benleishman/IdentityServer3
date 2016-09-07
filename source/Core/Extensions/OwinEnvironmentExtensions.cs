@@ -14,9 +14,12 @@
  * limitations under the License.
  */
 
+using Autofac;
 using IdentityServer3.Core.Configuration;
 using IdentityServer3.Core.Configuration.Hosting;
 using IdentityServer3.Core.Models;
+using IdentityServer3.Core.Services;
+using IdentityServer3.Core.Services.Default;
 using Microsoft.Owin;
 using Microsoft.Owin.Security;
 using System;
@@ -382,6 +385,21 @@ namespace IdentityServer3.Core.Extensions
         }
 
         /// <summary>
+        /// Returns true if the user checked the "remember me" flag on the login page prior to the partial login.
+        /// </summary>
+        /// <param name="env">The env.</param>
+        /// <returns></returns>
+        /// <exception cref="System.ArgumentNullException">env</exception>
+        /// <exception cref="System.Exception">No partial login</exception>
+        public static async Task<bool?> GetPartialLoginRememberMeAsync(this IDictionary<string, object> env)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            var context = new OwinContext(env);
+            return await context.GetPartialLoginRememberMeAsync();
+        }
+
+        /// <summary>
         /// Gets the sign in message.
         /// </summary>
         /// <param name="env">The OWIN environment.</param>
@@ -423,6 +441,62 @@ namespace IdentityServer3.Core.Extensions
             if (String.IsNullOrWhiteSpace(id)) return null;
 
             return env.GetSignInMessage(id);
+        }
+
+        /// <summary>
+        /// Gets the sign out message id.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <returns></returns>
+        /// <exception cref="System.ArgumentNullException">
+        /// env
+        /// or
+        /// id
+        /// </exception>
+        public static string GetSignOutMessageId(this IDictionary<string, object> env)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            var ctx = new OwinContext(env);
+            return ctx.Request.Query.Get(Constants.Authentication.SignoutId);
+        }
+
+        /// <summary>
+        /// Gets the sign out message.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <param name="id">The sign out message id.</param>
+        /// <returns></returns>
+        /// <exception cref="System.ArgumentNullException">
+        /// env
+        /// or
+        /// id
+        /// </exception>
+        public static SignOutMessage GetSignOutMessage(this IDictionary<string, object> env, string id)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+            if (string.IsNullOrEmpty(id)) throw new ArgumentNullException("id");
+
+            var options = env.ResolveDependency<IdentityServerOptions>();
+            var cookie = new MessageCookie<SignOutMessage>(env, options);
+
+            return cookie.Read(id);
+        }
+
+        /// <summary>
+        /// Gets the sign out message.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <returns></returns>
+        /// <exception cref="System.ArgumentNullException">
+        /// env
+        /// or
+        /// id
+        /// </exception>
+        public static SignOutMessage GetSignOutMessage(this IDictionary<string, object> env)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+            return env.GetSignOutMessage(env.GetSignOutMessageId());
         }
 
         /// <summary>
@@ -480,6 +554,176 @@ namespace IdentityServer3.Core.Extensions
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Sets the origin for the current request.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <param name="origin">The origin.</param>
+        /// <returns></returns>
+        public static void SetIdentityServerOrigin(this IDictionary<string, object> env, string origin)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            env[Constants.OwinEnvironment.IdentityServerOrigin] = origin;
+        }
+
+        /// <summary>
+        /// Gets the explicitly configured per-request origin, or the current requests's origin.
+        /// Note: This API ignores any configured IdentityServerOptions' PublicOrigin property.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <returns></returns>
+        public static string GetIdentityServerOrigin(this IDictionary<string, object> env)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            object value;
+            if (env.TryGetValue(Constants.OwinEnvironment.IdentityServerOrigin, out value))
+            {
+                var origin = value as string;
+                if (origin != null)
+                {
+                    return origin.RemoveTrailingSlash();
+                }
+            }
+
+            var request = new OwinRequest(env);
+            return request.Uri.Scheme + "://" + request.Host.Value;
+        }
+
+        /// <summary>
+        /// Resolves dependency T from the IdentityServer DI system.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <returns></returns>
+        public static T ResolveDependency<T>(this IDictionary<string, object> env)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            var context = new OwinContext(env);
+            return context.ResolveDependency<T>();
+        }
+
+        /// <summary>
+        /// Resolves dependency type from the IdentityServer DI system.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <param name="type">The Type to resolve.</param>
+        /// <returns></returns>
+        public static object ResolveDependency(this IDictionary<string, object> env, Type type)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            var context = new OwinContext(env);
+            return context.ResolveDependency(type);
+        }
+
+        /// <summary>
+        /// Requests that the logged out view be rendered and the signout message cookie be removed.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <param name="signOutMessageId">The sign out message id.</param>
+        /// <returns></returns>
+        public static Task RenderLoggedOutViewAsync(this IDictionary<string, object> env, string signOutMessageId)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            var context = new OwinContext(env);
+            context.QueueRenderLoggedOutPage(signOutMessageId);
+            return Task.FromResult(0);
+        }
+
+        /// <summary>
+        /// Revokes authentication cookies and renders HTML to trigger single signout of all clients. This is intended to be used within an iframe when an external, upstream IdP is providing a signout callback to IdentityServer for single signout.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <returns></returns>
+        public static async Task ProcessFederatedSignoutAsync(this IDictionary<string, object> env)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            var context = new OwinContext(env);
+            context.ClearAuthenticationCookies();
+            await context.CallUserServiceSignOutAsync();
+
+            var sessionCookie = context.ResolveDependency<SessionCookie>();
+            var sid = sessionCookie.GetSessionId();
+            if (sid != null)
+            {
+                var options = context.ResolveDependency<IdentityServerOptions>();
+                var baseUrl = context.GetIdentityServerBaseUrl();
+                var iframeUrls = options.RenderProtocolUrls(baseUrl, sid);
+
+                context.Response.ContentType = "text/html";
+                var html = AssetManager.LoadSignoutFrame(iframeUrls);
+                await context.Response.WriteAsync(html);
+            }
+        }
+
+        /// <summary>
+        /// Returns the IssuerUri from either the IdentityServerOptions or calculated from the incoming request URL.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <returns></returns>
+        public static string GetIdentityServerIssuerUri(this IDictionary<string, object> env)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            var options = env.ResolveDependency<IdentityServerOptions>();
+
+            // if they've explicitly configured a URI then use it,
+            // otherwise dynamically calculate it
+            var uri = options.IssuerUri;
+            if (uri.IsMissing())
+            {
+                uri = env.GetIdentityServerBaseUrl();
+                if (uri.EndsWith("/")) uri = uri.Substring(0, uri.Length - 1);
+            }
+
+            return uri;
+        }
+
+        /// <summary>
+        /// Returns collection of ClientIds that the user has signed into for the current authentication session.
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <returns></returns>
+        public static IEnumerable<string> GetClientIdsForCurrentAuthenticationSession(this IDictionary<string, object> env)
+        {
+            if (env == null) throw new ArgumentNullException("env");
+
+            var clientListCookie = env.ResolveDependency<ClientListCookie>();
+            return clientListCookie.GetClients();
+        }
+
+        /// <summary>
+        /// Creates a JWT access token for situations where identityserver extensibility code needs to act as a client to a token protected service
+        /// </summary>
+        /// <param name="env">The OWIN environment.</param>
+        /// <param name="clientId">The value of the client_id claim in the token.</param>
+        /// <param name="scope">The value of the scope claim in the token.</param>
+        /// <param name="lifetime">The lifetime of the token.</param>
+        /// <returns>a JWT</returns>
+        public static async Task<string> IssueClientToken(this IDictionary<string, object> env, string clientId, string scope, int lifetime)
+        {
+            var signingService = env.ResolveDependency<ITokenSigningService>();
+            var issuerUri = env.GetIdentityServerIssuerUri();
+
+            var token = new Token
+            {
+                Issuer = issuerUri,
+                Audience = string.Format(Constants.AccessTokenAudience, issuerUri.EnsureTrailingSlash()),
+                Lifetime = lifetime,
+                Claims = new List<Claim>
+                {
+                    new Claim("client_id", clientId),
+                    new Claim("scope", scope)
+                }
+            };
+
+            return await signingService.SignTokenAsync(token);
         }
     }
 }

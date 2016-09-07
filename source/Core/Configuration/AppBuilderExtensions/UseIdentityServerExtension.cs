@@ -69,19 +69,28 @@ namespace Owin
                 app.SetLoggerFactory(new LibLogKatanaLoggerFactory());
             }
 
+            app.UseEmbeddedFileServer();
+
             app.ConfigureRequestId();
-
-            options.ProtocolLogoutUrls.Add(Constants.RoutePaths.Oidc.EndSessionCallback);
             app.ConfigureDataProtectionProvider(options);
-
             app.ConfigureIdentityServerBaseUrl(options.PublicOrigin);
             app.ConfigureIdentityServerIssuer(options);
+
+            app.ConfigureRequestBodyBuffer();
+
+            // this needs to be earlier than the autofac middleware so anything is disposed and re-initialized
+            // if we send the request back into the pipeline to render the logged out page
+            app.ConfigureRenderLoggedOutPage();
 
             var container = AutofacConfig.Configure(options);
             app.UseAutofacMiddleware(container);
 
             app.UseCors();
             app.ConfigureCookieAuthentication(options.AuthenticationOptions.CookieOptions, options.DataProtector);
+
+            // this needs to be before external middleware
+            app.ConfigureSignOutMessageCookie();
+
 
             if (options.PluginConfiguration != null)
             {
@@ -92,8 +101,6 @@ namespace Owin
             {
                 options.AuthenticationOptions.IdentityProviders(app, Constants.ExternalAuthenticationType);
             }
-
-            app.UseEmbeddedFileServer();
 
             app.ConfigureHttpLogging(options.LoggingOptions);
 
@@ -126,7 +133,7 @@ namespace Owin
             }
             if (!cert.HasPrivateKey || !cert.IsPrivateAccessAllowed())
             {
-                Logger.Error("Signing certificate has not private key or private key is not accessible. Make sure the account running your application has access to the private key");
+                Logger.Error("Signing certificate has no private key or the private key is not accessible. Make sure the account running your application has access to the private key");
                 await eventSvc.RaiseCertificatePrivateKeyNotAccessibleEventAsync(cert);
 
                 return;

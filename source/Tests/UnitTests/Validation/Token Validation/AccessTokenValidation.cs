@@ -16,10 +16,10 @@
 
 using FluentAssertions;
 using IdentityServer3.Core;
+using IdentityServer3.Core.Configuration;
 using IdentityServer3.Core.Extensions;
 using IdentityServer3.Core.Models;
 using IdentityServer3.Core.Services;
-using IdentityServer3.Core.Services.Default;
 using IdentityServer3.Core.Services.InMemory;
 using Moq;
 using System;
@@ -138,6 +138,21 @@ namespace IdentityServer3.Tests.Validation.Tokens
 
         [Fact]
         [Trait("Category", Category)]
+        public async Task Reference_Token_Too_Long()
+        {
+            var store = new InMemoryTokenHandleStore();
+            var validator = Factory.CreateTokenValidator(store);
+            var options = new IdentityServerOptions();
+
+            var longToken = "x".Repeat(options.InputLengthRestrictions.TokenHandle + 1);
+            var result = await validator.ValidateAccessTokenAsync(longToken);
+
+            result.IsError.Should().BeTrue();
+            result.Error.Should().Be(Constants.ProtectedResourceErrors.InvalidToken);
+        }
+
+        [Fact]
+        [Trait("Category", Category)]
         public async Task Expired_Reference_Token()
         {
             now = DateTimeOffset.UtcNow;
@@ -175,7 +190,7 @@ namespace IdentityServer3.Tests.Validation.Tokens
         [Trait("Category", Category)]
         public async Task Valid_JWT_Token()
         {
-            var signer = new DefaultTokenSigningService(TestIdentityServerOptions.Create());
+            var signer = Factory.CreateDefaultTokenSigningService();
             var jwt = await signer.SignTokenAsync(TokenFactory.CreateAccessToken(new Client { ClientId = "roclient" }, "valid", 600, "read", "write"));
 
             var validator = Factory.CreateTokenValidator(null);
@@ -188,7 +203,7 @@ namespace IdentityServer3.Tests.Validation.Tokens
         [Trait("Category", Category)]
         public async Task JWT_Token_invalid_Issuer()
         {
-            var signer = new DefaultTokenSigningService(TestIdentityServerOptions.Create());
+            var signer = Factory.CreateDefaultTokenSigningService();
             var token = TokenFactory.CreateAccessToken(new Client { ClientId = "roclient" }, "valid", 600, "read", "write");
             token.Issuer = "invalid";
             var jwt = await signer.SignTokenAsync(token);
@@ -202,9 +217,23 @@ namespace IdentityServer3.Tests.Validation.Tokens
 
         [Fact]
         [Trait("Category", Category)]
+        public async Task JWT_Token_Too_Long()
+        {
+            var signer = Factory.CreateDefaultTokenSigningService();
+            var jwt = await signer.SignTokenAsync(TokenFactory.CreateAccessTokenLong(new Client { ClientId = "roclient" }, "valid", 600, 1000, "read", "write"));
+            
+            var validator = Factory.CreateTokenValidator(null);
+            var result = await validator.ValidateAccessTokenAsync(jwt);
+
+            result.IsError.Should().BeTrue();
+            result.Error.Should().Be(Constants.ProtectedResourceErrors.InvalidToken);
+        }
+
+        [Fact]
+        [Trait("Category", Category)]
         public async Task JWT_Token_invalid_Audience()
         {
-            var signer = new DefaultTokenSigningService(TestIdentityServerOptions.Create());
+            var signer = Factory.CreateDefaultTokenSigningService();
             var token = TokenFactory.CreateAccessToken(new Client { ClientId = "roclient" }, "valid", 600, "read", "write");
             token.Audience = "invalid";
             var jwt = await signer.SignTokenAsync(token);

@@ -17,7 +17,9 @@
 using Autofac;
 using Autofac.Integration.Owin;
 using IdentityServer3.Core.Configuration;
+using IdentityServer3.Core.Configuration.Hosting;
 using IdentityServer3.Core.Models;
+using IdentityServer3.Core.Services;
 using Microsoft.Owin;
 using Microsoft.Owin.Security;
 using System;
@@ -61,27 +63,19 @@ namespace IdentityServer3.Core.Extensions
             env[Constants.OwinEnvironment.IdentityServerBasePath] = value;
         }
 
-        public static ILifetimeScope GetLifetimeScope(this IDictionary<string, object> env)
-        {
-            if (env == null) throw new ArgumentNullException("env");
-
-            return new OwinContext(env).GetAutofacLifetimeScope();
-        }
-
-        public static T ResolveDependency<T>(this IDictionary<string, object> env)
-        {
-            if (env == null) throw new ArgumentNullException("env");
-
-            var scope = env.GetLifetimeScope();
-            var instance = (T)scope.ResolveOptional(typeof(T));
-            return instance;
-        }
-
         public static T ResolveDependency<T>(this IOwinContext context)
         {
             if (context == null) throw new ArgumentNullException("context");
-            
-            return context.Environment.ResolveDependency<T>();
+
+            return (T)context.ResolveDependency(typeof(T));
+        }
+
+        public static object ResolveDependency(this IOwinContext context, Type type)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+
+            var scope = context.GetAutofacLifetimeScope();
+            return scope.ResolveOptional(type);
         }
 
         public static IEnumerable<AuthenticationDescription> GetExternalAuthenticationProviders(this IOwinContext context, IEnumerable<string> filter = null)
@@ -156,6 +150,24 @@ namespace IdentityServer3.Core.Extensions
             if (context == null) throw new ArgumentNullException("context");
 
             return await context.GetIdentityFrom(Constants.PartialSignInAuthenticationType);
+        }
+
+        public static async Task<bool?> GetPartialLoginRememberMeAsync(this IOwinContext context)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+
+            var result = await context.Authentication.AuthenticateAsync(Constants.PartialSignInAuthenticationType);
+            if (result == null || result.Identity == null || result.Identity.IsAuthenticated == false)
+            {
+                throw new Exception("No partial login");
+            }
+
+            if (result.Properties.Dictionary.ContainsKey(Constants.Authentication.PartialLoginRememberMe))
+            {
+                return "true".Equals(result.Properties.Dictionary[Constants.Authentication.PartialLoginRememberMe]);
+            }
+
+            return null;
         }
 
         public static async Task<ClaimsIdentity> GetIdentityFromExternalSignIn(this IOwinContext context)
@@ -268,16 +280,7 @@ namespace IdentityServer3.Core.Extensions
         {
             if (context == null) throw new ArgumentNullException("context");
 
-            var options = context.ResolveDependency<IdentityServerOptions>();
-
-            var uri = options.IssuerUri;
-            if (String.IsNullOrWhiteSpace(uri))
-            {
-                uri = context.GetIdentityServerBaseUrl();
-                if (uri.EndsWith("/")) uri = uri.Substring(0, uri.Length - 1);
-            }
-
-            return uri;
+            return context.Environment.GetIdentityServerIssuerUri();
         }
 
         public static string GetIdentityServerLogoutUrl(this IOwinContext context)
@@ -410,6 +413,125 @@ namespace IdentityServer3.Core.Extensions
             }
 
             return nv;
+        }
+
+        const string SignOutMessageCookieIdtoRemove = "ids:SignOutMessageCookieIdtoRemove";
+        public static void QueueRemovalOfSignOutMessageCookie(this IOwinContext context, string id)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+            if (id != null)
+            {
+                context.Environment[SignOutMessageCookieIdtoRemove] = id;
+            }
+        }
+        public static void ProcessRemovalOfSignOutMessageCookie(this IOwinContext context, MessageCookie<SignOutMessage> signOutMessageCookie)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+            if (signOutMessageCookie == null) throw new ArgumentNullException("signOutMessageCookie");
+
+            if (context.Response.StatusCode == 200 && context.Environment.ContainsKey(SignOutMessageCookieIdtoRemove))
+            {
+                signOutMessageCookie.Clear((string)context.Environment[SignOutMessageCookieIdtoRemove]);
+            }
+        }
+
+        const string QueueRenderLoggedOutPageFlag = "ids:QueueRenderLoggedOutPage";
+        public static void QueueRenderLoggedOutPage(this IOwinContext context, string signOutMessageId)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+            context.Environment[QueueRenderLoggedOutPageFlag] = signOutMessageId;
+        }
+        public static bool ShouldRenderLoggedOutPage(this IOwinContext context)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+            return context.Environment.ContainsKey(QueueRenderLoggedOutPageFlag);
+        }
+        public static void PrepareContextForLoggedOutPage(this IOwinContext context)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+
+            context.Request.Method = "POST";
+            context.Request.ContentType = "application/x-www-form-urlencoded";
+            context.Request.Path = new PathString("/" + Constants.RoutePaths.Logout);
+            var signOutId = context.Environment[QueueRenderLoggedOutPageFlag];
+            if (signOutId != null)
+            {
+                context.Request.QueryString = new QueryString("id", (string)context.Environment[QueueRenderLoggedOutPageFlag]);
+            }
+
+            context.SetSuppressAntiForgeryCheck();
+        }
+
+        const string SuppressAntiForgeryCheck = "ids:SuppressAntiForgeryCheck";
+        public static void SetSuppressAntiForgeryCheck(this IOwinContext context)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+            context.Environment[SuppressAntiForgeryCheck] = true;
+        }
+        public static bool GetSuppressAntiForgeryCheck(this IOwinContext context)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+            return context.Environment.ContainsKey(SuppressAntiForgeryCheck) && true.Equals(context.Environment[SuppressAntiForgeryCheck]);
+        }
+
+        public static void ClearAuthenticationCookies(this IOwinContext context)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+
+            context.Authentication.SignOut(
+                Constants.PrimaryAuthenticationType,
+                Constants.ExternalAuthenticationType,
+                Constants.PartialSignInAuthenticationType);
+        }
+
+        public static void SignOutOfExternalIdP(this IOwinContext context, string signOutId)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+
+            // look for idp claim other than IdSvr
+            // if present, then signout of it
+            var user = context.Authentication.User;
+            if (user != null && user.Identity != null && user.Identity.IsAuthenticated)
+            {
+                var idp = user.GetIdentityProvider();
+                if (idp != Constants.BuiltInIdentityProvider)
+                {
+                    var authProps = new AuthenticationProperties();
+                    var options = context.ResolveDependency<IdentityServerOptions>();
+
+                    if (options.AuthenticationOptions.EnableAutoCallbackForFederatedSignout)
+                    {
+                        authProps.RedirectUri = context.Environment.GetIdentityServerLogoutUrl().EnsureTrailingSlash();
+                        if (signOutId != null)
+                        {
+                            authProps.RedirectUri = authProps.RedirectUri.AddQueryString(Constants.Authentication.SignoutId + "=" + signOutId);
+                        }
+                    }
+                    context.Authentication.SignOut(authProps, idp);
+                }
+            }
+        }
+
+        public static async Task CallUserServiceSignOutAsync(this IOwinContext context, string clientId = null)
+        {
+            if (context == null) throw new ArgumentNullException("context");
+
+            var result = await context.Authentication.AuthenticateAsync(Constants.PrimaryAuthenticationType);
+            if (result != null)
+            {
+                var user = result.Identity;
+                if (user != null && user.IsAuthenticated)
+                {
+                    var signOutContext = new SignOutContext
+                    {
+                        Subject = new ClaimsPrincipal(user),
+                        ClientId = clientId
+                    };
+
+                    var userService = context.ResolveDependency<IUserService>();
+                    await userService.SignOutAsync(signOutContext);
+                }
+            }
         }
     }
 }
